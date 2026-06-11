@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Flipbook</title>
+<script src="book.js"></script>
+<style>
+  :root { --bar: #1d1d22; --stage: #2b2b33; --ink: #cfd6e4; --accent: #c9a24a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--stage);
+    font-family: "Segoe UI", "Sarabun", system-ui, sans-serif; color: var(--ink);
+    overflow: hidden; -webkit-tap-highlight-color: transparent; }
+  #stage { position: absolute; inset: 0 0 56px 0; display: flex;
+    align-items: center; justify-content: center; overflow: hidden; }
+  #flip { touch-action: none; }
+  /* page cells used by StPageFlip loadFromHTML */
+  .page { background: #fff; overflow: hidden; }
+  .page img { width: 100%; height: 100%; object-fit: contain; display: block;
+    background: #f4f1ea; }
+  .page .ph { width: 100%; height: 100%; display: flex; align-items: center;
+    justify-content: center; color: #b9b2a3; font-size: 14px; background: #f4f1ea; }
+
+  /* toolbar */
+  #bar { position: absolute; left: 0; right: 0; bottom: 0; height: 56px;
+    background: var(--bar); display: flex; align-items: center; gap: 4px;
+    padding: 0 10px; z-index: 30; }
+  #bar button { background: transparent; border: 0; color: var(--ink);
+    font-size: 18px; width: 40px; height: 40px; border-radius: 6px; cursor: pointer; }
+  #bar button:hover { background: rgba(255,255,255,.08); }
+  #counter { display: flex; align-items: center; gap: 6px; font-size: 14px;
+    margin: 0 6px; white-space: nowrap; }
+  #counter input { width: 46px; background: #2b2b33; border: 1px solid #3a3a44;
+    color: var(--ink); border-radius: 5px; text-align: center; padding: 4px; }
+  #title { font-size: 14px; color: #9aa1b1; margin-left: auto;
+    max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .spacer { flex: 1 1 auto; }
+
+  /* thumbnail sidebar */
+  #thumbs { position: absolute; top: 0; bottom: 56px; left: 0; width: 150px;
+    background: #16161a; overflow-y: auto; transform: translateX(-100%);
+    transition: transform .2s ease; z-index: 25; padding: 8px; }
+  #thumbs.open { transform: translateX(0); }
+  #thumbs .t { display: block; width: 100%; margin: 0 0 8px; border: 2px solid transparent;
+    border-radius: 3px; cursor: pointer; }
+  #thumbs .t.active { border-color: var(--accent); }
+  #thumbs .t img { width: 100%; display: block; border-radius: 2px; background: #333; }
+  #thumbs .t span { font-size: 11px; color: #7c8294; display: block; text-align: center; }
+</style>
+</head>
+<body>
+  <div id="thumbs" aria-label="Thumbnails"></div>
+  <div id="stage"><div id="flip"></div></div>
+
+  <div id="bar">
+    <button id="btnThumbs" title="Thumbnails / สารบัญ">☰</button>
+    <button id="btnPrev" title="Previous / ก่อนหน้า">◀</button>
+    <span id="counter">
+      <input id="pageInput" type="text" inputmode="numeric" value="1" />
+      <span id="pageTotal">/ 1</span>
+    </span>
+    <button id="btnNext" title="Next / ถัดไป">▶</button>
+    <div class="spacer"></div>
+    <button id="btnAuto" title="Auto-flip / เล่นอัตโนมัติ">▶︎❙</button>
+    <button id="btnZoomOut" title="Zoom out / ย่อ">−</button>
+    <button id="btnZoomIn" title="Zoom in / ขยาย">＋</button>
+    <button id="btnFull" title="Fullscreen / เต็มจอ">⤢</button>
+    <span id="title"></span>
+  </div>
+
+  <script src="vendor/page-flip.browser.js"></script>
+  <script>
+  (function () {
+    var BOOK = window.BOOK || { title: 'Flipbook', pageCount: 0, pageWidth: 0, pageHeight: 0 };
+    document.title = BOOK.title;
+    document.getElementById('title').textContent = BOOK.title;
+    var total = BOOK.pageCount;
+    var ratio = (BOOK.pageWidth && BOOK.pageHeight) ? (BOOK.pageWidth / BOOK.pageHeight) : (2652 / 2800);
+
+    var stage = document.getElementById('stage');
+    var flipEl = document.getElementById('flip');
+    var BUFFER = 3; // pages each side to keep loaded
+
+    // Build page cells with lazy data-src.
+    var cells = [];
+    for (var i = 1; i <= total; i++) {
+      var d = document.createElement('div');
+      d.className = 'page';
+      d.setAttribute('data-density', i === 1 || i === total ? 'hard' : 'soft');
+      var img = document.createElement('img');
+      img.setAttribute('data-src', 'pages/' + String(i).padStart(4, '0') + '.jpg');
+      img.alt = 'Page ' + i;
+      var ph = document.createElement('div'); ph.className = 'ph'; ph.textContent = i;
+      img.style.display = 'none';
+      d.appendChild(ph); d.appendChild(img);
+      flipEl.appendChild(d);
+      cells.push(d);
+    }
+
+    function computeSize() {
+      var maxH = stage.clientHeight - 24;
+      var maxW = stage.clientWidth - 24;
+      var portrait = stage.clientWidth < 760;
+      var spreadRatio = portrait ? ratio : ratio * 2;
+      var w = maxW, h = w / spreadRatio;
+      if (h > maxH) { h = maxH; w = h * spreadRatio; }
+      var pageW = portrait ? w : w / 2;
+      return { pageW: Math.floor(pageW), pageH: Math.floor(h), portrait: portrait };
+    }
+
+    var St = window.St || window;
+    var sz = computeSize();
+    var pageFlip = new St.PageFlip(flipEl, {
+      width: sz.pageW, height: sz.pageH,
+      size: 'fixed',
+      minWidth: 200, maxWidth: 3000, minHeight: 200, maxHeight: 3000,
+      drawShadow: true, flippingTime: 700,
+      usePortrait: true, showCover: true,
+      mobileScrollSupport: false
+    });
+    pageFlip.loadFromHTML(document.querySelectorAll('#flip .page'));
+
+    document.getElementById('pageTotal').textContent = '/ ' + total;
+
+    function loadNear(idx) { // idx is 0-based page index
+      for (var k = 0; k < cells.length; k++) {
+        var img = cells[k].querySelector('img');
+        var near = Math.abs(k - idx) <= BUFFER;
+        if (near && img.getAttribute('data-src')) {
+          img.src = img.getAttribute('data-src');
+          img.removeAttribute('data-src');
+          img.onload = function () { this.style.display = 'block'; var p = this.parentNode.querySelector('.ph'); if (p) p.style.display = 'none'; };
+          img.onerror = function () { var p = this.parentNode.querySelector('.ph'); if (p) p.textContent = '—'; };
+        }
+      }
+    }
+
+    function current() { return pageFlip.getCurrentPageIndex() || 0; }
+    function syncUI() {
+      var idx = current();
+      document.getElementById('pageInput').value = (idx + 1);
+      loadNear(idx);
+      var ts = document.querySelectorAll('#thumbs .t');
+      for (var j = 0; j < ts.length; j++) ts[j].classList.toggle('active', j === idx);
+    }
+
+    pageFlip.on('flip', syncUI);
+    pageFlip.on('changeState', syncUI);
+    loadNear(0);
+
+    // ---- thumbnails ----
+    var tWrap = document.getElementById('thumbs');
+    for (var t = 1; t <= total; t++) {
+      (function (n) {
+        var a = document.createElement('div'); a.className = 't';
+        var im = document.createElement('img');
+        im.loading = 'lazy';
+        im.src = 'thumbs/' + String(n).padStart(4, '0') + '.jpg';
+        var s = document.createElement('span'); s.textContent = n;
+        a.appendChild(im); a.appendChild(s);
+        a.addEventListener('click', function () { pageFlip.flip(n - 1); });
+        tWrap.appendChild(a);
+      })(t);
+    }
+    document.getElementById('btnThumbs').addEventListener('click', function () {
+      tWrap.classList.toggle('open');
+    });
+
+    // ---- nav buttons ----
+    document.getElementById('btnPrev').addEventListener('click', function () { pageFlip.flipPrev(); });
+    document.getElementById('btnNext').addEventListener('click', function () { pageFlip.flipNext(); });
+    var pageInput = document.getElementById('pageInput');
+    function jump() {
+      var n = parseInt(pageInput.value, 10);
+      if (!isNaN(n) && n >= 1 && n <= total) pageFlip.flip(n - 1);
+      else pageInput.value = current() + 1;
+    }
+    pageInput.addEventListener('change', jump);
+    pageInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') jump(); });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.target === pageInput) return;
+      if (e.key === 'ArrowLeft') pageFlip.flipPrev();
+      if (e.key === 'ArrowRight') pageFlip.flipNext();
+    });
+
+    // ---- auto-flip ----
+    var autoTimer = null;
+    document.getElementById('btnAuto').addEventListener('click', function () {
+      if (autoTimer) { clearInterval(autoTimer); autoTimer = null; return; }
+      autoTimer = setInterval(function () {
+        if (current() >= total - 1) { clearInterval(autoTimer); autoTimer = null; return; }
+        pageFlip.flipNext();
+      }, 2500);
+    });
+
+    // ---- zoom + pan ----
+    var zoom = 1, panX = 0, panY = 0;
+    function applyZoom() {
+      flipEl.style.transformOrigin = 'center center';
+      flipEl.style.transform = 'translate(' + panX + 'px,' + panY + 'px) scale(' + zoom + ')';
+      flipEl.style.cursor = zoom > 1 ? 'grab' : 'default';
+    }
+    document.getElementById('btnZoomIn').addEventListener('click', function () {
+      zoom = Math.min(3, zoom + 0.25); applyZoom();
+    });
+    document.getElementById('btnZoomOut').addEventListener('click', function () {
+      zoom = Math.max(1, zoom - 0.25); if (zoom === 1) { panX = panY = 0; } applyZoom();
+    });
+    var dragging = false, sx = 0, sy = 0;
+    stage.addEventListener('pointerdown', function (e) {
+      if (zoom <= 1) return; dragging = true; sx = e.clientX - panX; sy = e.clientY - panY;
+      flipEl.style.cursor = 'grabbing';
+    });
+    window.addEventListener('pointermove', function (e) {
+      if (!dragging) return; panX = e.clientX - sx; panY = e.clientY - sy; applyZoom();
+    });
+    window.addEventListener('pointerup', function () { dragging = false; if (zoom > 1) flipEl.style.cursor = 'grab'; });
+
+    // ---- fullscreen ----
+    document.getElementById('btnFull').addEventListener('click', function () {
+      if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+      else document.exitFullscreen();
+    });
+
+    // ---- responsive resize ----
+    var rt;
+    window.addEventListener('resize', function () {
+      clearTimeout(rt);
+      rt = setTimeout(function () {
+        var s = computeSize();
+        pageFlip.update({ width: s.pageW, height: s.pageH });
+        syncUI();
+      }, 150);
+    });
+  })();
+  </script>
+</body>
+</html>
