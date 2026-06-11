@@ -9,7 +9,7 @@
     "serve": "npx --yes serve books -l 5000"
   },
   "dependencies": {
-    "playwright": "^1.49.0",
+    "playwright": "1.58.0",
     "sharp": "^0.33.5"
   }
 }
