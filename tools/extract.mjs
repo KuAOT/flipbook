@@ -20,16 +20,30 @@ const pagesDir = path.join(bookDir, 'pages');
 const thumbsDir = path.join(bookDir, 'thumbs');
 const vendorDir = path.join(bookDir, 'vendor');
 
-// FlipHTML5 serves page images under .../files/<size>/<n>.(jpg|webp).
-// We score by size keyword and pick the largest rendition per page index.
-const SIZE_RANK = { large: 3, normal: 2, mobile: 1, thumb: 0 };
-function classify(url) {
-  const m = url.match(/\/files\/([a-z]+)\/(\d+)\.(jpg|jpeg|png|webp)(?:\?|$)/i);
-  if (!m) return null;
-  return { size: m[1].toLowerCase(), index: Number(m[2]), ext: m[3].toLowerCase() };
+async function readFileSafe(p) { try { return await readFile(p); } catch { return null; } }
+
+// Resolve a page-relative asset reference (e.g. "files/large/x.webp?t" or
+// "./files/thumb/y.webp") against the book's base URL.
+function resolveAsset(ref, base) {
+  if (!ref) return null;
+  return new URL(ref.replace(/^\.\//, ''), base.endsWith('/') ? base : base + '/').toString();
 }
 
-async function readFileSafe(p) { try { return await readFile(p); } catch { return null; } }
+// Fetch a URL with retries; CloudFront occasionally stalls a single request.
+async function fetchBuffer(ctx, url, referer, attempts = 4) {
+  let lastErr;
+  for (let a = 1; a <= attempts; a++) {
+    try {
+      const resp = await ctx.request.get(url, { headers: { referer }, timeout: 60000 });
+      if (!resp.ok()) throw new Error(`HTTP ${resp.status()}`);
+      return Buffer.from(await resp.body());
+    } catch (e) {
+      lastErr = e;
+      if (a < attempts) await new Promise((r) => setTimeout(r, 1500 * a));
+    }
+  }
+  throw lastErr;
+}
 
 async function main() {
   await mkdir(pagesDir, { recursive: true });
@@ -44,83 +58,63 @@ async function main() {
   });
   const page = await ctx.newPage();
 
-  // best[index] = { url, rank, ext }
-  const best = new Map();
-  page.on('response', (resp) => {
-    const info = classify(resp.url());
-    if (!info) return;
-    const rank = SIZE_RANK[info.size] ?? -1;
-    if (rank < 0) return;
-    const cur = best.get(info.index);
-    if (!cur || rank > cur.rank) {
-      best.set(info.index, { url: resp.url(), rank, ext: info.ext });
-    }
-  });
-
   console.log('Opening', bookUrl);
-  await page.goto(bookUrl, { waitUntil: 'networkidle', timeout: 120000 });
+  // 'networkidle' never fires on FlipHTML5 (constant analytics traffic), so
+  // wait for DOM load, then poll for the decrypted page list the viewer
+  // exposes at window.fliphtml5_pages once its WASM config decryption runs.
+  await page.goto(bookUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
 
-  // Read page count + dimensions from FlipHTML5's decrypted runtime config.
-  const meta = await page.evaluate(() => {
-    const find = (obj, depth = 0) => {
-      if (!obj || depth > 4 || typeof obj !== 'object') return null;
-      if (typeof obj.pageCount === 'number' && obj.pageCount > 0) return obj;
-      for (const k of Object.keys(obj)) {
-        try { const r = find(obj[k], depth + 1); if (r) return r; } catch { /* cross-origin */ }
-      }
-      return null;
-    };
-    const cfg = find(window) || {};
-    return {
-      pageCount: cfg.pageCount || 0,
-      pageWidth: cfg.pageWidth || 0,
-      pageHeight: cfg.pageHeight || 0,
-      title: (document.title || '').trim(),
-    };
-  });
-
-  if (!meta.pageCount) throw new Error('Could not determine page count from book runtime.');
-  console.log(`Book "${meta.title}" — ${meta.pageCount} pages`);
-
-  // Drive the viewer through every page so each large image is requested.
-  for (let i = 1; i <= meta.pageCount; i++) {
-    await page.evaluate((n) => { location.hash = `#p=${n}`; }, i);
-    await page.keyboard.press('ArrowRight').catch(() => {});
-    await page.waitForTimeout(250);
-    if (i % 10 === 0 || i === meta.pageCount) {
-      console.log(`  preloaded ~${best.size}/${meta.pageCount} page images`);
-    }
+  let pages = [];
+  for (let tries = 0; tries < 45 && pages.length === 0; tries++) {
+    await page.waitForTimeout(2000);
+    pages = await page.evaluate(() => {
+      const list = window.fliphtml5_pages;
+      if (!Array.isArray(list) || list.length === 0) return [];
+      // n = full-size image, t/p = thumbnail, w/h = page dimensions
+      return list.map((p) => ({ n: p.n || p.l || '', t: p.t || p.p || '', w: p.w || 0, h: p.h || 0 }));
+    });
   }
-  // Give late responses a moment.
-  await page.waitForLoadState('networkidle').catch(() => {});
-  await page.waitForTimeout(1500);
+  if (pages.length === 0) throw new Error('Could not read window.fliphtml5_pages — book did not initialize.');
 
-  if (best.size < meta.pageCount) {
-    console.warn(`WARNING: only captured ${best.size}/${meta.pageCount} page URLs. Retrying gaps…`);
-    for (let i = 1; i <= meta.pageCount; i++) {
-      if (best.has(i)) continue;
-      await page.evaluate((n) => { location.hash = `#p=${n}`; }, i);
-      await page.waitForTimeout(600);
-    }
-    await page.waitForTimeout(1500);
-  }
+  const meta = await page.evaluate(() => ({
+    title: (document.title || '').trim(),
+    pageWidth: (window.htmlConfig && window.htmlConfig.pageWidth) || 0,
+    pageHeight: (window.htmlConfig && window.htmlConfig.pageHeight) || 0,
+  }));
+  const sized = pages.find((p) => p.w && p.h);
+  const pageWidth = Math.round(meta.pageWidth || (sized && sized.w) || 0);
+  const pageHeight = Math.round(meta.pageHeight || (sized && sized.h) || 0);
+  const pageCount = pages.length;
+  console.log(`Book "${meta.title}" — ${pageCount} pages`);
 
   // Download each page in order via the browser context (keeps cookies/referer).
+  // Idempotent: skip pages already on disk so a rerun resumes where it stopped.
   let downloaded = 0;
-  for (let i = 1; i <= meta.pageCount; i++) {
-    const hit = best.get(i);
-    if (!hit) { console.warn(`  MISSING page ${i} — no URL captured`); continue; }
-    const resp = await ctx.request.get(hit.url, { headers: { referer: bookUrl } });
-    if (!resp.ok()) { console.warn(`  page ${i}: HTTP ${resp.status()}`); continue; }
-    const buf = Buffer.from(await resp.body());
-    // Normalize everything to JPEG for the viewer.
+  for (let i = 0; i < pageCount; i++) {
+    const num = i + 1;
+    const pagePath = path.join(pagesDir, pageFilename(num));
+    const thumbPath = path.join(thumbsDir, pageFilename(num));
+    if (existsSync(pagePath) && existsSync(thumbPath)) { downloaded++; continue; }
+
+    const fullUrl = resolveAsset(pages[i].n, bookUrl);
+    const thumbUrl = resolveAsset(pages[i].t, bookUrl);
+    if (!fullUrl) { console.warn(`  MISSING page ${num} — no image reference`); continue; }
+
+    const buf = await fetchBuffer(ctx, fullUrl, bookUrl);
+    // Normalize to JPEG for the viewer (source pages are webp).
     const jpeg = await sharp(buf).jpeg({ quality: 88 }).toBuffer();
-    await writeFile(path.join(pagesDir, pageFilename(i)), jpeg);
-    // Thumbnail ~ 200px tall.
-    const thumb = await sharp(buf).resize({ height: 200 }).jpeg({ quality: 72 }).toBuffer();
-    await writeFile(path.join(thumbsDir, pageFilename(i)), thumb);
+    await writeFile(pagePath, jpeg);
+
+    // Prefer the served thumbnail; fall back to downscaling the full image.
+    let thumbBuf = buf;
+    if (thumbUrl) {
+      try { thumbBuf = await fetchBuffer(ctx, thumbUrl, bookUrl, 2); } catch { /* fall back to full image */ }
+    }
+    const thumb = await sharp(thumbBuf).resize({ height: 200 }).jpeg({ quality: 72 }).toBuffer();
+    await writeFile(thumbPath, thumb);
+
     downloaded++;
-    if (i % 10 === 0 || i === meta.pageCount) console.log(`  downloaded ${downloaded}/${meta.pageCount}`);
+    if (num % 10 === 0 || num === pageCount) console.log(`  downloaded ${downloaded}/${pageCount}`);
   }
 
   await browser.close();
@@ -129,9 +123,9 @@ async function main() {
   const bookJs =
     `window.BOOK = ${JSON.stringify({
       title: meta.title || bookName,
-      pageCount: meta.pageCount,
-      pageWidth: Math.round(meta.pageWidth) || 0,
-      pageHeight: Math.round(meta.pageHeight) || 0,
+      pageCount,
+      pageWidth,
+      pageHeight,
     }, null, 2)};\n`;
   await writeFile(path.join(bookDir, 'book.js'), bookJs);
 
@@ -142,8 +136,8 @@ async function main() {
   if (vendorLib) await writeFile(path.join(vendorDir, 'page-flip.browser.js'), vendorLib);
 
   const files = (await readdir(pagesDir)).filter((f) => f.endsWith('.jpg'));
-  console.log(`\nDone. ${files.length}/${meta.pageCount} pages in ${pagesDir}`);
-  if (files.length !== meta.pageCount) {
+  console.log(`\nDone. ${files.length}/${pageCount} pages in ${pagesDir}`);
+  if (files.length !== pageCount) {
     console.error('VERIFY FAILED: page file count does not match page count.');
     process.exit(2);
   }
