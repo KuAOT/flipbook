@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "extract": "node tools/extract.mjs",
-    "test": "node --test tools/lib/",
+    "test": "node --test tools/lib/*.test.mjs",
     "serve": "npx --yes serve books -l 5000"
   },
   "dependencies": {
