@@ -28,6 +28,8 @@
   #bar button { background: transparent; border: 0; color: var(--ink);
     font-size: 18px; width: 40px; height: 40px; border-radius: 6px; cursor: pointer; }
   #bar button:hover { background: rgba(255,255,255,.08); }
+  #zoomPct { width: auto; min-width: 52px; font-size: 13px; color: #9aa1b1; }
+  #zoomPct.zoomed { color: var(--accent); }
   #counter { display: flex; align-items: center; gap: 6px; font-size: 14px;
     margin: 0 6px; white-space: nowrap; }
   #counter input { width: 46px; background: #2b2b33; border: 1px solid #3a3a44;
@@ -63,6 +65,7 @@
     <div class="spacer"></div>
     <button id="btnAuto" title="Auto-flip / เล่นอัตโนมัติ">▶︎❙</button>
     <button id="btnZoomOut" title="Zoom out / ย่อ">−</button>
+    <button id="zoomPct" title="Reset zoom / รีเซ็ตซูม">100%</button>
     <button id="btnZoomIn" title="Zoom in / ขยาย">＋</button>
     <button id="btnFull" title="Fullscreen / เต็มจอ">⤢</button>
     <span id="title"></span>
@@ -116,7 +119,10 @@
       minWidth: 200, maxWidth: 3000, minHeight: 200, maxHeight: 3000,
       drawShadow: true, flippingTime: 700,
       usePortrait: true, showCover: true,
-      mobileScrollSupport: false
+      mobileScrollSupport: false,
+      // Click-to-flip only on page corners; clicks elsewhere are reserved
+      // for the double-click zoom toggle.
+      disableFlipByClick: true
     });
     pageFlip.loadFromHTML(document.querySelectorAll('#flip .page'));
 
@@ -182,6 +188,8 @@
       if (e.target === pageInput) return;
       if (e.key === 'ArrowLeft') pageFlip.flipPrev();
       if (e.key === 'ArrowRight') pageFlip.flipNext();
+      if (e.key === '+' || e.key === '=') zoomIn(); // '=' is the unshifted + key
+      if (e.key === '-' || e.key === '_') zoomOut();
     });
 
     // ---- auto-flip ----
@@ -196,17 +204,27 @@
 
     // ---- zoom + pan ----
     var zoom = 1, panX = 0, panY = 0;
+    var zoomPct = document.getElementById('zoomPct');
     function applyZoom() {
       flipEl.style.transformOrigin = 'center center';
       flipEl.style.transform = 'translate(' + panX + 'px,' + panY + 'px) scale(' + zoom + ')';
       flipEl.style.cursor = zoom > 1 ? 'grab' : 'default';
+      zoomPct.textContent = Math.round(zoom * 100) + '%';
+      zoomPct.classList.toggle('zoomed', zoom > 1);
     }
-    document.getElementById('btnZoomIn').addEventListener('click', function () {
-      zoom = Math.min(3, zoom + 0.25); applyZoom();
-    });
-    document.getElementById('btnZoomOut').addEventListener('click', function () {
-      zoom = Math.max(1, zoom - 0.25); if (zoom === 1) { panX = panY = 0; } applyZoom();
-    });
+    function resetZoom() { zoom = 1; panX = panY = 0; applyZoom(); }
+    zoomPct.addEventListener('click', resetZoom);
+    function zoomIn() { zoom = Math.min(3, zoom + 0.25); applyZoom(); }
+    function zoomOut() { zoom = Math.max(1, zoom - 0.25); if (zoom === 1) { panX = panY = 0; } applyZoom(); }
+    document.getElementById('btnZoomIn').addEventListener('click', zoomIn);
+    document.getElementById('btnZoomOut').addEventListener('click', zoomOut);
+    // While zoomed, dragging must pan — not flip. StPageFlip listens for
+    // mousedown/touchstart on its inner element, so swallow those in the
+    // capture phase before they reach it. Pointer events still drive the pan.
+    // preventDefault stops the browser's native image-drag from hijacking the pan.
+    function blockFlipInput(e) { if (zoom > 1) { e.stopPropagation(); if (e.type === 'mousedown') e.preventDefault(); } }
+    stage.addEventListener('mousedown', blockFlipInput, true);
+    stage.addEventListener('touchstart', blockFlipInput, true);
     var dragging = false, sx = 0, sy = 0;
     stage.addEventListener('pointerdown', function (e) {
       if (zoom <= 1) return; dragging = true; sx = e.clientX - panX; sy = e.clientY - panY;
@@ -216,6 +234,27 @@
       if (!dragging) return; panX = e.clientX - sx; panY = e.clientY - sy; applyZoom();
     });
     window.addEventListener('pointerup', function () { dragging = false; if (zoom > 1) flipEl.style.cursor = 'grab'; });
+
+    // Double-click / double-tap toggles zoom: reset when zoomed, else 2x into
+    // the clicked spot. Tracked via pointer events so it works for touch too
+    // (mobile browsers don't reliably fire dblclick).
+    var lastTap = 0, lastTapX = 0, lastTapY = 0, downX = 0, downY = 0;
+    stage.addEventListener('pointerdown', function (e) { downX = e.clientX; downY = e.clientY; });
+    stage.addEventListener('pointerup', function (e) {
+      if (Math.abs(e.clientX - downX) > 8 || Math.abs(e.clientY - downY) > 8) { lastTap = 0; return; } // drag, not a tap
+      var now = Date.now();
+      var isDouble = now - lastTap < 350 && Math.abs(e.clientX - lastTapX) < 25 && Math.abs(e.clientY - lastTapY) < 25;
+      lastTap = isDouble ? 0 : now; lastTapX = e.clientX; lastTapY = e.clientY;
+      if (!isDouble) return;
+      if (zoom > 1) { resetZoom(); return; }
+      // Zoom 2x keeping the tapped point fixed: with transform-origin at the
+      // stage center, that point sits at offset (p - c), so pan by (c - p).
+      var r = stage.getBoundingClientRect();
+      zoom = 2;
+      panX = (r.left + r.width / 2) - e.clientX;
+      panY = (r.top + r.height / 2) - e.clientY;
+      applyZoom();
+    });
 
     // ---- fullscreen ----
     document.getElementById('btnFull').addEventListener('click', function () {

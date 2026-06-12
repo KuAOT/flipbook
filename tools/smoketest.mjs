@@ -66,6 +66,79 @@ const thumbOk = await page.evaluate(() => {
 });
 if (!thumbOk) fail('thumbnail image did not load'); else console.log('thumbnail image loaded: ok');
 
+// Zoomed drag pans without flipping pages (regression: drag used to trigger a flip)
+await page.click('#btnThumbs'); // close thumbs so they don't cover the stage
+await page.waitForTimeout(400);
+const pageBeforeDrag = await page.inputValue('#pageInput');
+await page.click('#btnZoomIn');
+await page.click('#btnZoomIn'); // zoom = 1.5
+const box = await page.locator('#stage').boundingBox();
+const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+await page.mouse.move(cx + 200, cy);
+await page.mouse.down();
+await page.mouse.move(cx - 200, cy, { steps: 10 });
+await page.mouse.up();
+await page.waitForTimeout(1200);
+const pageAfterDrag = await page.inputValue('#pageInput');
+const transform = await page.evaluate(() => document.getElementById('flip').style.transform);
+console.log('zoomed drag: page', pageBeforeDrag, '->', pageAfterDrag, 'transform:', transform);
+if (pageAfterDrag !== pageBeforeDrag) fail('zoomed drag flipped the page');
+const panX = Number((transform.match(/translate\((-?\d+(?:\.\d+)?)px/) || [])[1] || 0);
+if (panX > -300) fail('zoomed drag did not pan the full drag distance (panX=' + panX + ')');
+await page.click('#btnZoomOut');
+await page.click('#btnZoomOut');
+
+// Zoom indicator shows current level; clicking it resets to 100%
+let pct = (await page.textContent('#zoomPct')).trim();
+if (pct !== '100%') fail('zoom indicator should start at 100%, got ' + pct);
+await page.click('#btnZoomIn');
+pct = (await page.textContent('#zoomPct')).trim();
+if (pct !== '125%') fail('zoom indicator should show 125% after zoom in, got ' + pct);
+await page.click('#zoomPct');
+pct = (await page.textContent('#zoomPct')).trim();
+let tf = await page.evaluate(() => document.getElementById('flip').style.transform);
+console.log('zoom indicator reset:', pct, tf);
+if (pct !== '100%' || !/scale\(1\)/.test(tf)) fail('clicking zoom % did not reset zoom');
+
+// Double-click toggles zoom: 100% -> 200% into the clicked spot, then back to 100%
+const pageBeforeDbl = await page.inputValue('#pageInput');
+await page.mouse.dblclick(cx + 100, cy);
+await page.waitForTimeout(300);
+pct = (await page.textContent('#zoomPct')).trim();
+tf = await page.evaluate(() => document.getElementById('flip').style.transform);
+console.log('after dblclick:', pct, tf);
+if (pct !== '200%' || !/scale\(2\)/.test(tf)) fail('double-click did not zoom to 200%');
+if (!/translate\(-\d/.test(tf)) fail('double-click zoom did not pan toward clicked spot');
+await page.mouse.dblclick(cx + 100, cy);
+await page.waitForTimeout(300);
+pct = (await page.textContent('#zoomPct')).trim();
+tf = await page.evaluate(() => document.getElementById('flip').style.transform);
+console.log('after second dblclick:', pct, tf);
+if (pct !== '100%' || !/scale\(1\)/.test(tf)) fail('double-click did not reset zoom to 100%');
+const pageAfterDbl = await page.inputValue('#pageInput');
+if (pageAfterDbl !== pageBeforeDbl) fail('double-click zoom toggle changed the page (' + pageBeforeDbl + ' -> ' + pageAfterDbl + ')');
+
+// Click on a page corner still flips (disableFlipByClick keeps corners active)
+const fbox = await page.locator('#flip').boundingBox();
+await page.mouse.click(fbox.x + fbox.width - 15, fbox.y + fbox.height - 15);
+await page.waitForTimeout(1200);
+const pageAfterCorner = await page.inputValue('#pageInput');
+console.log('after corner click:', pageBeforeDbl, '->', pageAfterCorner);
+if (Number(pageAfterCorner) <= Number(pageBeforeDbl)) fail('corner click did not flip the page');
+
+// Keyboard +/- zooms in and out
+await page.keyboard.press('+');
+await page.keyboard.press('+');
+pct = (await page.textContent('#zoomPct')).trim();
+console.log('after keyboard ++:', pct);
+if (pct !== '150%') fail('keyboard + did not zoom in (got ' + pct + ')');
+await page.keyboard.press('-');
+await page.keyboard.press('-');
+pct = (await page.textContent('#zoomPct')).trim();
+tf = await page.evaluate(() => document.getElementById('flip').style.transform);
+console.log('after keyboard --:', pct, tf);
+if (pct !== '100%' || !/scale\(1\)/.test(tf)) fail('keyboard - did not zoom back out');
+
 // No external network requests
 console.log('external requests:', external.length);
 if (external.length) { console.error(external.slice(0, 10).join('\n')); fail('viewer made external requests'); }
