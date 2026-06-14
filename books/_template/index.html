@@ -79,7 +79,8 @@
 
     var stage = document.getElementById('stage');
     var flipEl = document.getElementById('flip');
-    var BUFFER = 3; // pages each side to keep loaded
+    var BUFFER = 3; // immediate neighbours loaded each side of the current page
+    var AHEAD = 6;  // extra pages prefetched in the direction of travel
 
     // Build page cells with lazy data-src.
     var cells = [];
@@ -122,17 +123,50 @@
 
     document.getElementById('pageTotal').textContent = '/ ' + total;
 
+    // Swap a single cell's data-src into src (idempotent). Returns true if it
+    // kicked off a load, false if the cell was already loading/loaded.
+    function loadCell(k) {
+      if (k < 0 || k >= cells.length) return false;
+      var img = cells[k].querySelector('img');
+      if (!img || !img.getAttribute('data-src')) return false;
+      img.onload = function () { this.style.display = 'block'; var p = this.parentNode.querySelector('.ph'); if (p) p.style.display = 'none'; };
+      img.onerror = function () { var p = this.parentNode.querySelector('.ph'); if (p) p.textContent = '—'; };
+      img.src = img.getAttribute('data-src');
+      img.removeAttribute('data-src');
+      return true;
+    }
+
+    // Direction-aware prefetch. Loads the visible spread first, then fans out —
+    // reaching further in the direction the reader is travelling so fast
+    // forward-flipping stays ahead of the page.
+    var lastIdx = 0;
     function loadNear(idx) { // idx is 0-based page index
+      var dir = idx >= lastIdx ? 1 : -1;
+      lastIdx = idx;
+      for (var d = 0; d <= BUFFER; d++) { loadCell(idx - d); loadCell(idx + d); }
+      for (var a = 1; a <= AHEAD; a++) loadCell(idx + dir * (BUFFER + a));
+    }
+
+    // Background preload: once the viewer is idle, walk every remaining page one
+    // at a time, always picking the unloaded page nearest the current one, and
+    // chaining on each image's load. Sequential keeps bandwidth focused so the
+    // on-demand prefetch above isn't starved, while the whole book ends up
+    // cached for instant later flips.
+    var idle = window.requestIdleCallback || function (fn) { return setTimeout(fn, 200); };
+    function preloadNext() {
+      var c = current(), best = -1, bestDist = Infinity;
       for (var k = 0; k < cells.length; k++) {
-        var img = cells[k].querySelector('img');
-        var near = Math.abs(k - idx) <= BUFFER;
-        if (near && img.getAttribute('data-src')) {
-          img.src = img.getAttribute('data-src');
-          img.removeAttribute('data-src');
-          img.onload = function () { this.style.display = 'block'; var p = this.parentNode.querySelector('.ph'); if (p) p.style.display = 'none'; };
-          img.onerror = function () { var p = this.parentNode.querySelector('.ph'); if (p) p.textContent = '—'; };
-        }
+        if (!cells[k].querySelector('img').getAttribute('data-src')) continue;
+        var dist = Math.abs(k - c);
+        if (dist < bestDist) { bestDist = dist; best = k; }
       }
+      if (best < 0) return; // every page loaded
+      var img = cells[best].querySelector('img');
+      var chain = function () { idle(preloadNext); };
+      img.onload = function () { this.style.display = 'block'; var p = this.parentNode.querySelector('.ph'); if (p) p.style.display = 'none'; chain(); };
+      img.onerror = function () { var p = this.parentNode.querySelector('.ph'); if (p) p.textContent = '—'; chain(); };
+      img.src = img.getAttribute('data-src');
+      img.removeAttribute('data-src');
     }
 
     function current() { return pageFlip.getCurrentPageIndex() || 0; }
@@ -147,6 +181,7 @@
     pageFlip.on('flip', syncUI);
     pageFlip.on('changeState', syncUI);
     loadNear(0);
+    idle(preloadNext); // start filling the cache once the first spread is in flight
 
     // ---- thumbnails ----
     var tWrap = document.getElementById('thumbs');

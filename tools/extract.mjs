@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pageFilename } from './lib/naming.mjs';
+import { encodePage } from './lib/encode.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -101,8 +102,9 @@ async function main() {
     if (!fullUrl) { console.warn(`  MISSING page ${num} — no image reference`); continue; }
 
     const buf = await fetchBuffer(ctx, fullUrl, bookUrl);
-    // Normalize to JPEG for the viewer (source pages are webp).
-    const jpeg = await sharp(buf).jpeg({ quality: 88 }).toBuffer();
+    // Normalize to JPEG and downscale to display size for the viewer
+    // (source pages are full-resolution webp). See lib/encode.mjs.
+    const jpeg = await encodePage(buf);
     await writeFile(pagePath, jpeg);
 
     // Prefer the served thumbnail; fall back to downscaling the full image.
