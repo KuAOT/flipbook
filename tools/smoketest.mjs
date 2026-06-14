@@ -1,7 +1,13 @@
 // E2E smoke test: drive the viewer headlessly and assert core behavior.
 import { chromium } from 'playwright';
 
-const base = 'http://localhost:5000/Samsen45-M3-2540/';
+// Defaults to the first book; pass a folder name to smoke-test another, e.g.
+//   node tools/smoketest.mjs samsen45-m6-2543
+const book = process.argv[2] || 'Samsen45-M3-2540';
+// Port override: on macOS the AirPlay receiver squats on :5000, so serve can land
+// elsewhere. Set PORT to match `npx serve books -l <port>`.
+const port = process.env.PORT || 5000;
+const base = `http://localhost:${port}/${book}/`;
 const browser = await chromium.launch({ headless: true });
 const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
 const page = await ctx.newPage();
@@ -9,7 +15,7 @@ const page = await ctx.newPage();
 const external = [];
 page.on('request', (r) => {
   const u = r.url();
-  if (!u.startsWith('http://localhost:5000') && !u.startsWith('data:') && !u.startsWith('blob:')) external.push(u);
+  if (!u.startsWith(`http://localhost:${port}`) && !u.startsWith('data:') && !u.startsWith('blob:')) external.push(u);
 });
 
 const fail = (m) => { console.error('FAIL:', m); process.exitCode = 1; };
@@ -22,10 +28,11 @@ const title = await page.title();
 console.log('title:', title);
 if (!title.includes('Samsen')) fail('title not applied from book.js');
 
-// Page counter total
+// Expected page count comes from the book itself, so the test works for any book.
+const expectedPages = await page.evaluate(() => window.BOOK && window.BOOK.pageCount);
 const totalText = await page.textContent('#pageTotal');
-console.log('counter total:', totalText);
-if (!/102/.test(totalText)) fail('page total not 102');
+console.log('counter total:', totalText, '(expected', expectedPages + ')');
+if (!new RegExp(`/ ${expectedPages}\\b`).test(totalText)) fail(`page total not ${expectedPages}`);
 
 // Cover image actually loaded (naturalWidth > 0)
 const coverOk = await page.evaluate(() => {
@@ -56,7 +63,7 @@ await page.waitForTimeout(400);
 const thumbCount = await page.evaluate(() => document.querySelectorAll('#thumbs .t').length);
 const thumbsOpen = await page.evaluate(() => document.getElementById('thumbs').classList.contains('open'));
 console.log('thumbs:', thumbCount, 'open:', thumbsOpen);
-if (thumbCount !== 102) fail('thumbnail count != 102');
+if (thumbCount !== expectedPages) fail(`thumbnail count != ${expectedPages}`);
 if (!thumbsOpen) fail('thumbnail panel did not open');
 
 // A thumbnail image loaded
